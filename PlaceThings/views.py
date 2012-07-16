@@ -26,6 +26,10 @@ import os
 ''' Decorators'''
 
 def login_required( fn ):
+    '''
+    Applied to a request handler to require an authenticated account
+    '''
+
     def check_login( request ):
         if not request.user.is_authenticated():
             return API_Error( 'not logged in' )
@@ -33,6 +37,10 @@ def login_required( fn ):
     return check_login
                     
 class http_parameter_required(object):
+    '''
+    Applied to a request handler to ensure a specified parameter is supplied with the request
+    '''
+
     def __init__(self, request_method, parameter_name, human_readable_name ):
         self.request_method = request_method
         self.parameter_name = parameter_name
@@ -57,57 +65,81 @@ class http_parameter_required(object):
 
 
 def place(request):
+    '''
+    Stores a Thing with the media, location, and metadata.
+    '''
+
+    # Remove junk parameters
     for key in request.POST:
         if request.POST.get( key ) == "":
             request.POST.update( {key: None} )
     
+    # Figure out the type of Thing - video, text, etc.
     if request.POST.get('type'):
         media_type = request.POST.get('type')
     else:
         media_type = ''
     
+    # Start persisting the Thing
     thing = Thing()
     thing.title = request.POST.get( 'title', None )
     thing.description = request.POST.get( 'description', None )
     thing.tags = request.POST.get( 'tags', None )
 
+    # Things can be placed anonymously - helps fulfill the requirement of "fun".
     if type( request.user ) is User:
         thing.author = request.user
 
+    # Set privacy - public, private, friends-only, etc.
     if request.POST.get( 'privacy', None ) is not None:
         if type( request.user ) is User:
             thing.privacy = request.POST.get( 'privacy' )
         else:
             API_Error( 'must be logged in to set privacy') 
             
+    # Things can be bundled together
     if request.POST.get( 'parent' ) is not None:
         thing.parent = Thing.objects.get( pk=request.POST.get( 'parent' ) )
         
 
+    # Playing around with the idea of scarcity and being able to "collect" Things
     # thing.quantity = request.POST.get( 'quantity', None )
+
+    # Most important attributes
     thing.lattitude = float(request.POST['lattitude'])
     thing.longitude = float(request.POST['longitude'])
     
+    # Another idea involving scarcity - Things can have lifespans
     thing.duration = request.POST.get( 'duration',None )
+
+    # Make sure the parent knows where it's children are!
     if thing.parent and 0 != thing.parent:
         thing.update_parent()
+
     thing.save()    
-    
+
+    # Store the media file    
     if  media_type == 'webvideo':
+        # Upload to YouTube
         name = "http://www.youtube.com/watch?v=" + request.POST.get('media', None)
         request.session['oauth_domain'] = ''
         thing.save_file (name,'video')
     elif media_type == 'V':
+        # Store video on server
         name = request.POST.get('media', None)
         thing.save_file (name,'video')
     elif request.FILES.get( 'media', None ):
-        # Save file
+        # Save text, audio, and picture files
         name = request.FILES['media'].name
+
+        # We don't let people upload just any old file...
         if 0 == name.count( '.' ):
             return API_Error( 'Invalid file type' )
+        
         request.FILES['media'].name = str(thing.id) + name[name.rindex('.'):].lower()
+        
         try:
-            thing.save_file( request.FILES['media'], 'other' )
+            thing.save_file( request.FILES['media'], 'other' ) # Performs validation to make sure it's safe
         except Thing_Exception as errorstr:
             thing.delete()
             return API_Error( errorstr )            
@@ -115,18 +147,33 @@ def place(request):
         thing.delete()
         return API_Error( 'No media' )
         
+    '''
+    One of our final goals of PlaceThings was to be able to see heatmaps of Things in an area. This turned out to be
+    a very difficult problem of optimization. It seems simple until you consider the ability to zoom in and out. 
+    The code below was implemented to speed up lookups for the number of Things in an area given a set of GPS 
+    coordinates. At the time, there was very little information on optimizing geo lookups publicly available 
+    and no software available.
+
+    This was the last thing we were working on, and it hasn't been cleaned up cosmetically, but basically the 
+    optimization works like so: 
+
+    For both the lattitude and longitude, we round the coordinate value to three decimal places. Then, we 
+    calculate nine imaginary geographic regions, three regions high and three regions wide. The original (rounded)
+    coordinates are used for the coordinates of the central region. All regions are separated by 0.001 degress of 
+    lattitude/longitude.
+    '''
 
     slat,slng = float('%3.3f' % thing.lattitude), float('%3.3f' % thing.longitude)
     
-    # Calculate short lat and short long
+    # Calculate short lattitude and short longitude
     
     region_lat = [None]*9
     region_lng = [None]*9
     wt = [None]*9
     
-    #assign the centre lat and lng values of the region
+    # Assign the center lattitude and longitude values of the region
     
-    #assigning lat and lng values to the 9 regions created
+    # Assign lattitude and longitude values to the 9 regions created
     for i in range(0, 3):
         region_lat[i] = slat - 0.001
         region_lng[i*3] = slng - 0.001
@@ -143,7 +190,7 @@ def place(request):
         region_lng[j] = slng + 0.001
         j = j + 3
     
-    #assigning hardcoded weight values to the above created 9 regions
+    # Assign hardcoded weight values to the above created 9 regions
     j = 1
     k = 0
     for i in range(0,4):
@@ -153,7 +200,7 @@ def place(request):
         j = j + 2
         if k == 2:
             k = 4
-            #assigning maximum weight to the centre of the the region
+            # Assign maximum weight to the centre of the the region
             wt[k] = 0.002 
         k = k + 2
     
